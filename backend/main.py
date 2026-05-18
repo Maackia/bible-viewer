@@ -47,6 +47,39 @@ bible_abbr_map = {
 def read_root():
     return {"Hello": "World"}
 
+@app.get("/bible/{version}/{book}/chapters") # version 파라미터 추가
+def get_book_chapters(
+    version: str,
+    book: str
+):
+    file_name = version_file_map.get(version)
+    if not file_name:
+        return {"error": f"Unsupported bible version: {version}"}
+
+    file_path = os.path.join(os.path.dirname(__file__), "data", file_name)
+
+    try:
+        with open(file_path, 'r', encoding='cp949') as f:
+            content = f.read()
+
+        book_abbr = bible_abbr_map.get(book)
+        if not book_abbr:
+            return {"error": f"Bible book abbreviation not found for: {book}"}
+
+        chapter_numbers = set()
+        # 정규식: [성경약어](\d+):\d+
+        chapter_pattern = re.compile(rf"{book_abbr}(\d+):\d+")
+        for match in chapter_pattern.finditer(content):
+            chapter_numbers.add(int(match.group(1)))
+        
+        sorted_chapters = sorted(list(chapter_numbers))
+        return {"book": book, "chapters": sorted_chapters}
+
+    except FileNotFoundError:
+        return {"error": f"Bible file not found: {file_name}"}
+    except Exception as e:
+        return {"error": f"Error reading chapter data: {e}"}
+
 @app.get("/bible/{version}/{book}/{chapter}")
 def get_bible_chapter(
     version: str,
@@ -91,36 +124,3 @@ def get_bible_chapter(
     except Exception as e:
         return {"error": f"Error reading bible data: {e}"}
 
-
-@app.get("/bible/{version}/{book}/chapters") # version 파라미터 추가
-def get_book_chapters(
-    version: str,
-    book: str
-):
-    file_name = version_file_map.get(version)
-    if not file_name:
-        return {"error": f"Unsupported bible version: {version}"}
-
-    file_path = os.path.join(os.path.dirname(__file__), "data", file_name)
-
-    try:
-        with open(file_path, 'r', encoding='cp949') as f:
-            content = f.read()
-
-        book_abbr = bible_abbr_map.get(book)
-        if not book_abbr:
-            return {"error": f"Bible book abbreviation not found for: {book}"}
-
-        chapter_numbers = set()
-        # 정규식: [성경약어](\d+):\d+
-        chapter_pattern = re.compile(rf"{book_abbr}(\d+):\d+")
-        for match in chapter_pattern.finditer(content):
-            chapter_numbers.add(int(match.group(1)))
-        
-        sorted_chapters = sorted(list(chapter_numbers))
-        return {"book": book, "chapters": sorted_chapters}
-
-    except FileNotFoundError:
-        return {"error": f"Bible file not found: {file_name}"}
-    except Exception as e:
-        return {"error": f"Error reading chapter data: {e}"}
