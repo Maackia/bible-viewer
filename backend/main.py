@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -76,9 +80,10 @@ def get_book_chapters(
         return {"book": book, "chapters": sorted_chapters}
 
     except FileNotFoundError:
-        return {"error": f"Bible file not found: {file_name}"}
+        return {"error": "성경 파일을 찾을 수 없습니다."}
     except Exception as e:
-        return {"error": f"Error reading chapter data: {e}"}
+        logger.error("Chapter list error for %s/%s: %s", version, book, exc_info=True)
+        return {"error": "장 목록 조회 중 오류가 발생했습니다."}
 
 @app.get("/bible/{version}/{book}/{chapter}")
 def get_bible_chapter(
@@ -120,7 +125,8 @@ def get_bible_chapter(
             return {"error": "Chapter or verses not found"}
 
     except FileNotFoundError:
-        return {"error": f"Bible file not found: {file_name}"}
+        return {"error": "성경 파일을 찾을 수 없습니다."}
     except Exception as e:
-        return {"error": f"Error reading bible data: {e}"}
+        logger.error("Bible verse error for %s/%s/%d: %s", version, book, chapter, exc_info=True)
+        return {"error": "본문 조회 중 오류가 발생했습니다."}
 
