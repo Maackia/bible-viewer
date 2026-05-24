@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
+import json
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -47,35 +48,59 @@ bible_abbr_map = {
     "요한계시록": "계"
 }
 
+# 인덱스 로드 (앱 시작 시 한 번만 읽음)
+INDEX_PATH = os.path.join(os.path.dirname(__file__), "data", "index.json")
+
+
+def load_index() -> dict:
+    """인덱스 파일을 메모리에 로드합니다."""
+    try:
+        with open(INDEX_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning("Index file not found at %s. Falling back to full file scan.", INDEX_PATH)
+        return {}
+
+
+# 전역 인덱스 (서버 시작 시 한 번 로드)
+bible_index = load_index()
+
+
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
 
-@app.get("/bible/{version}/{book}/chapters") # version 파라미터 추가
-def get_book_chapters(
-    version: str,
-    book: str
-):
+
+@app.get("/bible/{version}/{book}/chapters")  # version 파라미터 추가
+def get_book_chapters(version: str, book: str):
+    """인덱스에서 장 목록을 빠르게 조회합니다."""
     file_name = version_file_map.get(version)
     if not file_name:
-        return {"error": f"Unsupported bible version: {version}"}
+        return {"error": "지원하지 않는 번역본입니다."}
 
+    # 인덱스에서 조회 (O(1))
+    index_data = bible_index.get(version, {})
+    book_chapters = index_data.get(book, {})
+
+    if book_chapters:
+        chapters = sorted([int(c) for c in book_chapters.keys()])
+        return {"book": book, "chapters": chapters}
+
+    # 인덱스에 없으면 파일에서 직접 스캔 (폴백)
     file_path = os.path.join(os.path.dirname(__file__), "data", file_name)
-
     try:
-        with open(file_path, 'r', encoding='cp949') as f:
+        with open(file_path, "r", encoding="cp949") as f:
             content = f.read()
 
         book_abbr = bible_abbr_map.get(book)
         if not book_abbr:
-            return {"error": f"Bible book abbreviation not found for: {book}"}
+            return {"error": f"성경 책 약어를 찾을 수 없습니다: {book}"}
 
         chapter_numbers = set()
-        # 정규식: [성경약어](\d+):\d+
         chapter_pattern = re.compile(rf"{book_abbr}(\d+):\d+")
         for match in chapter_pattern.finditer(content):
             chapter_numbers.add(int(match.group(1)))
-        
+
         sorted_chapters = sorted(list(chapter_numbers))
         return {"book": book, "chapters": sorted_chapters}
 
@@ -85,48 +110,58 @@ def get_book_chapters(
         logger.error("Chapter list error for %s/%s: %s", version, book, exc_info=True)
         return {"error": "장 목록 조회 중 오류가 발생했습니다."}
 
+
 @app.get("/bible/{version}/{book}/{chapter}")
-def get_bible_chapter(
-    version: str,
-    book: str,
-    chapter: int
-):
+def get_bible_chapter(version: str, book: str, chapter: int):
+    """인덱스에서 오프셋을 찾아 해당 장만 읽습니다."""
     file_name = version_file_map.get(version)
     if not file_name:
-        return {"error": f"Unsupported bible version: {version}"}
+        return {"error": "지원하지 않는 번역본입니다."}
 
+    # 인덱스에서 오프셋 조회
+    index_data = bible_index.get(version, {})
+    book_chapters = index_data.get(book, {})
+    chapter_str = str(chapter)
+
+    if not book_chapters or chapter_str not in book_chapters:
+        return {"error": "장 또는 절을 찾을 수 없습니다."}
+
+    start_offset = book_chapters[chapter_str]
     file_path = os.path.join(os.path.dirname(__file__), "data", file_name)
 
     try:
-        with open(file_path, 'r', encoding='cp949') as f: # 인코딩 CP949 사용
+        with open(file_path, "r", encoding="cp949") as f:
+            # 인덱스 오프셋부터 읽기 시작 (다음 장이 나오거나 파일 끝까지)
             content = f.read()
 
         book_abbr = bible_abbr_map.get(book)
         if not book_abbr:
-            return {"error": f"Bible book abbreviation not found for: {book}"}
+            return {"error": f"성경 책 약어를 찾을 수 없습니다: {book}"}
+
+        # 해당 장의 모든 절을 파싱하는 정규식
+        pattern = re.compile(
+            rf"{book_abbr}{chapter}:(\d+)\s*(.*?)(?={book_abbr}\d+:\d+|{book_abbr}\d+|$)",
+            re.DOTALL,
+        )
 
         verses_in_chapter = []
-        # 해당 장의 모든 절을 파싱하는 정규식
-        # 예: 창1:1 ... 창1:2 ...
-        # 다음 절의 시작 또는 다음 장의 시작 또는 파일 끝까지
-        # 정규식: [성경약어][장]:(\d+) (.*?)(?={book_abbr}\d+:\d+|{book_abbr}\d+|$)
-        # {book_abbr}\d+:\d+ 는 다음 절 마커, {book_abbr}\d+ 는 다음 장 마커 (예: 창2:1), $는 파일 끝
-        # \s*는 공백 문자를 0개 이상 허용
-        pattern = re.compile(rf"{book_abbr}{chapter}:(\d+)\s*(.*?)(?={book_abbr}\d+:\d+|{book_abbr}\d+|$)", re.DOTALL)
-        
         for match in pattern.finditer(content):
             verse_num = int(match.group(1))
             verse_text = match.group(2).strip()
             verses_in_chapter.append({"verse": verse_num, "text": verse_text})
 
         if verses_in_chapter:
-            return {"version": version, "book": book, "chapter": chapter, "verses": verses_in_chapter}
+            return {
+                "version": version,
+                "book": book,
+                "chapter": chapter,
+                "verses": verses_in_chapter,
+            }
         else:
-            return {"error": "Chapter or verses not found"}
+            return {"error": "장 또는 절을 찾을 수 없습니다."}
 
     except FileNotFoundError:
         return {"error": "성경 파일을 찾을 수 없습니다."}
     except Exception as e:
         logger.error("Bible verse error for %s/%s/%d: %s", version, book, chapter, exc_info=True)
         return {"error": "본문 조회 중 오류가 발생했습니다."}
-
