@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import json
+import pathlib
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -48,8 +49,11 @@ bible_abbr_map = {
     "요한계시록": "계"
 }
 
+# 허용된 데이터 디렉토리 (Path Traversal 방지용 기준 경로)
+DATA_DIR = pathlib.Path(os.path.dirname(__file__)) / "data"
+
 # 인덱스 로드 (앱 시작 시 한 번만 읽음)
-INDEX_PATH = os.path.join(os.path.dirname(__file__), "data", "index.json")
+INDEX_PATH = DATA_DIR / "index.json"
 
 
 def load_index() -> dict:
@@ -60,6 +64,15 @@ def load_index() -> dict:
     except FileNotFoundError:
         logger.warning("Index file not found at %s. Falling back to full file scan.", INDEX_PATH)
         return {}
+
+
+def resolve_safe_path(filename: str) -> pathlib.Path | None:
+    """파일명이 허용된 DATA_DIR 내에 있는지 검증합니다."""
+    target = (DATA_DIR / filename).resolve()
+    if not str(target).startswith(str(DATA_DIR.resolve())):
+        logger.warning("Path traversal attempt detected for file: %s", filename)
+        return None
+    return target
 
 
 # 전역 인덱스 (서버 시작 시 한 번 로드)
@@ -87,7 +100,10 @@ def get_book_chapters(version: str, book: str):
         return {"book": book, "chapters": chapters}
 
     # 인덱스에 없으면 파일에서 직접 스캔 (폴백)
-    file_path = os.path.join(os.path.dirname(__file__), "data", file_name)
+    safe_path = resolve_safe_path(file_name)
+    if not safe_path:
+        return {"error": "파일 경로가 유효하지 않습니다."}
+    file_path = str(safe_path)
     try:
         with open(file_path, "r", encoding="cp949") as f:
             content = f.read()
@@ -127,7 +143,10 @@ def get_bible_chapter(version: str, book: str, chapter: int):
         return {"error": "장 또는 절을 찾을 수 없습니다."}
 
     start_offset = book_chapters[chapter_str]
-    file_path = os.path.join(os.path.dirname(__file__), "data", file_name)
+    safe_path = resolve_safe_path(file_name)
+    if not safe_path:
+        return {"error": "파일 경로가 유효하지 않습니다."}
+    file_path = str(safe_path)
 
     try:
         with open(file_path, "r", encoding="cp949") as f:
