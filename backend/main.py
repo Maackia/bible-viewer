@@ -58,12 +58,17 @@ INDEX_PATH = DATA_DIR / "index.json"
 
 def load_index() -> dict:
     """인덱스 파일을 메모리에 로드합니다."""
-    try:
-        with open(INDEX_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        logger.warning("Index file not found at %s. Falling back to full file scan.", INDEX_PATH)
-        return {}
+    for enc in ("utf-8", "cp949", "euc-kr"):
+        try:
+            with open(INDEX_PATH, "r", encoding=enc) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.warning("Index file not found at %s. Falling back to full file scan.", INDEX_PATH)
+            return {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+    logger.warning("Index file could not be decoded properly. Returning empty index.")
+    return {}
 
 
 def resolve_safe_path(filename: str) -> pathlib.Path | None:
@@ -73,6 +78,13 @@ def resolve_safe_path(filename: str) -> pathlib.Path | None:
         logger.warning("Path traversal attempt detected for file: %s", filename)
         return None
     return target
+
+
+def resolve_book_abbr(book: str) -> str | None:
+    """전체 책 이름 또는 약어를 데이터 파일의 약어 키로 변환합니다."""
+    if book in bible_abbr_map.values():
+        return book
+    return bible_abbr_map.get(book)
 
 
 # 전역 인덱스 (서버 시작 시 한 번 로드)
@@ -91,9 +103,13 @@ def get_book_chapters(version: str, book: str):
     if not file_name:
         return {"error": "지원하지 않는 번역본입니다."}
 
+    book_abbr = resolve_book_abbr(book)
+    if not book_abbr:
+        return {"error": f"성경 책 약어를 찾을 수 없습니다: {book}"}
+
     # 인덱스에서 조회 (O(1))
     index_data = bible_index.get(version, {})
-    book_chapters = index_data.get(book, {})
+    book_chapters = index_data.get(book_abbr, {})
 
     if book_chapters:
         chapters = sorted([int(c) for c in book_chapters.keys()])
@@ -108,10 +124,6 @@ def get_book_chapters(version: str, book: str):
         with open(file_path, "r", encoding="cp949") as f:
             content = f.read()
 
-        book_abbr = bible_abbr_map.get(book)
-        if not book_abbr:
-            return {"error": f"성경 책 약어를 찾을 수 없습니다: {book}"}
-
         chapter_numbers = set()
         chapter_pattern = re.compile(rf"{book_abbr}(\d+):\d+")
         for match in chapter_pattern.finditer(content):
@@ -123,26 +135,25 @@ def get_book_chapters(version: str, book: str):
     except FileNotFoundError:
         return {"error": "성경 파일을 찾을 수 없습니다."}
     except Exception as e:
-        logger.error("Chapter list error for %s/%s: %s", version, book, exc_info=True)
+        logger.error("Chapter list error for %s/%s: %s", version, book, e, exc_info=True)
         return {"error": "장 목록 조회 중 오류가 발생했습니다."}
 
 
 @app.get("/bible/{version}/{book}/{chapter}")
 def get_bible_chapter(version: str, book: str, chapter: int):
-    """인덱스에서 오프셋을 찾아 해당 장만 읽습니다."""
+    """요청한 성경 장의 절 목록을 조회합니다."""
     file_name = version_file_map.get(version)
     if not file_name:
         return {"error": "지원하지 않는 번역본입니다."}
 
+    book_abbr = resolve_book_abbr(book)
+    if not book_abbr:
+        return {"error": f"성경 책 약어를 찾을 수 없습니다: {book}"}
+
     # 인덱스에서 오프셋 조회
     index_data = bible_index.get(version, {})
-    book_chapters = index_data.get(book, {})
+    book_chapters = index_data.get(book_abbr, {})
     chapter_str = str(chapter)
-
-    if not book_chapters or chapter_str not in book_chapters:
-        return {"error": "장 또는 절을 찾을 수 없습니다."}
-
-    start_offset = book_chapters[chapter_str]
     safe_path = resolve_safe_path(file_name)
     if not safe_path:
         return {"error": "파일 경로가 유효하지 않습니다."}
@@ -150,12 +161,10 @@ def get_bible_chapter(version: str, book: str, chapter: int):
 
     try:
         with open(file_path, "r", encoding="cp949") as f:
-            # 인덱스 오프셋부터 읽기 시작 (다음 장이 나오거나 파일 끝까지)
             content = f.read()
 
-        book_abbr = bible_abbr_map.get(book)
-        if not book_abbr:
-            return {"error": f"성경 책 약어를 찾을 수 없습니다: {book}"}
+        if book_chapters and chapter_str not in book_chapters:
+            return {"error": "장 또는 절을 찾을 수 없습니다."}
 
         # 해당 장의 모든 절을 파싱하는 정규식
         pattern = re.compile(
@@ -182,5 +191,5 @@ def get_bible_chapter(version: str, book: str, chapter: int):
     except FileNotFoundError:
         return {"error": "성경 파일을 찾을 수 없습니다."}
     except Exception as e:
-        logger.error("Bible verse error for %s/%s/%d: %s", version, book, chapter, exc_info=True)
+        logger.error("Bible verse error for %s/%s/%d: %s", version, book, chapter, e, exc_info=True)
         return {"error": "본문 조회 중 오류가 발생했습니다."}
